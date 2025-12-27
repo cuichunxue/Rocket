@@ -1,0 +1,578 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>Rocket Launch — Rich (iPhone Safari Safe)</title>
+<style>
+  :root{
+    --skyTop:#061126;
+    --skyMid:#0a1f45;
+    --skyBot:#12335f;
+    --ground:#08150f;
+    --uiBg: rgba(255,255,255,.10);
+    --uiBorder: rgba(255,255,255,.14);
+    --text: rgba(255,255,255,.92);
+  }
+  html,body{height:100%;margin:0;background:#000;overflow:hidden;-webkit-text-size-adjust:100%;}
+  canvas{display:block;width:100%;height:100%;touch-action:manipulation;}
+  .hud{
+    position:fixed;
+    left:12px; right:12px; top:12px;
+    display:flex; gap:10px; align-items:center; justify-content:space-between;
+    color:var(--text);
+    font-family:-apple-system,system-ui,Segoe UI,Roboto,Helvetica,Arial;
+    user-select:none;
+    z-index:10;
+  }
+  .hud .left{display:flex; gap:10px; align-items:center;}
+  .panel{
+    display:flex; gap:10px; align-items:center;
+    padding:10px 12px;
+    border-radius:18px;
+    background: var(--uiBg);
+    border:1px solid var(--uiBorder);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+  }
+  button{
+    border:1px solid var(--uiBorder);
+    background: rgba(255,255,255,.10);
+    color:var(--text);
+    padding:10px 14px;
+    border-radius:14px;
+    font-weight:600;
+  }
+  input[type="range"]{width:min(240px,45vw);}
+  .small{font-size:12px;opacity:.9;line-height:1.2}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<div class="hud">
+  <div class="left">
+    <button id="restart">Restart</button>
+    <div class="panel">
+      <div class="small">Time scale</div>
+      <input id="speed" type="range" min="0.6" max="1.8" step="0.05" value="1.0" />
+      <div id="speedVal" class="small">1.00×</div>
+    </div>
+    <div class="panel small">Tap to add smoke gust</div>
+  </div>
+  <div class="small" style="text-align:right;max-width:52vw">
+    Ignition → heavy smoke → slow liftoff → acceleration<br/>
+    iPhone Safari safe canvas (no fancy composites)
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('c');
+  // Safari-safe context (no attribute object)
+  const ctx = canvas.getContext('2d');
+  if(!ctx){
+    document.body.innerHTML = '<div style="color:#fff;font:16px system-ui;padding:20px">Canvas 2D not available.</div>';
+    return;
+  }
+
+  // --- UI
+  const restartBtn = document.getElementById('restart');
+  const speed = document.getElementById('speed');
+  const speedVal = document.getElementById('speedVal');
+  let timeScale = 1.0;
+  speed.addEventListener('input', () => {
+    timeScale = parseFloat(speed.value);
+    speedVal.textContent = timeScale.toFixed(2) + '×';
+  });
+
+  // --- Resize (DPR clamp for mobile performance)
+  let DPR = 1;
+  function resize(){
+    DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    canvas.width = Math.floor(innerWidth * DPR);
+    canvas.height = Math.floor(innerHeight * DPR);
+    // Work in CSS pixels using setTransform
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  }
+  addEventListener('resize', resize, {passive:true});
+  resize();
+
+  // --- Random helpers
+  function clamp(x,a,b){ return Math.max(a, Math.min(b, x)); }
+  function lerp(a,b,t){ return a + (b-a)*t; }
+  function easeInQuad(t){ return t*t; }
+  function easeOutQuad(t){ return 1-(1-t)*(1-t); }
+  function rnd(a=0,b=1){ return a + Math.random()*(b-a); }
+
+  // --- Stars (very light)
+  const stars = [];
+  function initStars(){
+    stars.length = 0;
+    const n = Math.floor(Math.sqrt(innerWidth*innerHeight)/2.4);
+    for(let i=0;i<n;i++){
+      stars.push({
+        x: Math.random()*innerWidth,
+        y: Math.random()*innerHeight*0.62,
+        r: rnd(0.6, 1.8),
+        a: rnd(0.15, 0.55),
+        tw: rnd(0.8, 2.2),
+        ph: rnd(0, Math.PI*2)
+      });
+    }
+  }
+  initStars();
+  addEventListener('resize', initStars, {passive:true});
+
+  // --- Particles (Safari-safe: simple circles with alpha + occasional gradients)
+  const smoke = [];
+  const sparks = [];
+
+  function addSmoke(x,y,vx,vy,rad,life,alpha){
+    smoke.push({x,y,vx,vy,rad,life,t:0,a:alpha, wob:rnd(0.6,2.0), ph:rnd(0,Math.PI*2)});
+  }
+  function addSpark(x,y,vx,vy,rad,life){
+    sparks.push({x,y,vx,vy,rad,life,t:0});
+  }
+
+  function smokeBurst(x,y,dir=0,amount=40,heavy=false){
+    for(let i=0;i<amount;i++){
+      const a = dir + rnd(-Math.PI, Math.PI);
+      const s = rnd(0.2, 1.0);
+      const sp = heavy ? rnd(0.2, 1.6) : rnd(0.15, 1.1);
+      addSmoke(
+        x + rnd(-14,14),
+        y + rnd(-6,18),
+        Math.cos(a)*sp*s + rnd(-0.3,0.3),
+        Math.sin(a)*sp*s + (heavy ? rnd(0.0,0.8) : rnd(-0.2,0.6)),
+        heavy ? rnd(18, 34) : rnd(14, 26),
+        heavy ? rnd(1.8, 2.8) : rnd(1.4, 2.4),
+        heavy ? rnd(0.20,0.32) : rnd(0.14,0.24)
+      );
+    }
+  }
+
+  // --- Rocket timeline state
+  const STATE = { IGNITION:0, SLOW:1, ACCEL:2, COAST:3 };
+  const rocket = { state: STATE.IGNITION, t:0, y:0, v:0, a:0, flame:0, shake:0 };
+
+  function reset(){
+    smoke.length = 0;
+    sparks.length = 0;
+    rocket.state = STATE.IGNITION;
+    rocket.t = 0;
+    rocket.y = 0;
+    rocket.v = 0;
+    rocket.a = 0;
+    rocket.flame = 0;
+    rocket.shake = 0;
+  }
+  restartBtn.addEventListener('click', reset);
+
+  // Tap to add gust (works on iOS)
+  canvas.addEventListener('pointerdown', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left);
+    const y = (e.clientY - rect.top);
+    smokeBurst(x, y, rnd(0,Math.PI*2), 55, false);
+  }, {passive:true});
+
+  // --- Draw helpers
+  function drawSky(now){
+    // gradient sky
+    const g = ctx.createLinearGradient(0,0,0,innerHeight);
+    g.addColorStop(0, '#061126');
+    g.addColorStop(0.45, '#0a1f45');
+    g.addColorStop(0.76, '#12335f');
+    g.addColorStop(1, '#08150f');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,innerWidth,innerHeight);
+
+    // subtle vignette
+    ctx.fillStyle = 'rgba(0,0,0,0.18)';
+    ctx.fillRect(0,0,innerWidth,innerHeight);
+
+    // stars
+    for(const s of stars){
+      const tw = 0.6 + 0.4*Math.sin(now*s.tw + s.ph);
+      ctx.globalAlpha = s.a*tw;
+      ctx.fillStyle = '#fff';
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawGround(){
+    const padY = innerHeight*0.78;
+    const padW = innerWidth*0.40;
+    const padH = 22;
+    const padX = (innerWidth-padW)/2;
+
+    // shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.38)';
+    ctx.beginPath();
+    ctx.ellipse(innerWidth/2, padY+24, padW*0.55, 22, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    // pad body
+    ctx.fillStyle = 'rgba(18,38,42,0.92)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.lineWidth = 2;
+
+    // rounded rect (manual)
+    roundRect(padX, padY, padW, padH, 10);
+    ctx.fill(); ctx.stroke();
+
+    // trench
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    roundRect(innerWidth/2 - padW*0.12, padY+6, padW*0.24, padH-12, 8);
+    ctx.fill();
+
+    // pad lines
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1;
+    for(let i=1;i<6;i++){
+      const x = padX + padW*i/6;
+      ctx.beginPath();
+      ctx.moveTo(x, padY+4);
+      ctx.lineTo(x, padY+padH-4);
+      ctx.stroke();
+    }
+  }
+
+  function roundRect(x,y,w,h,r){
+    r = Math.max(0, Math.min(r, w/2, h/2));
+    ctx.beginPath();
+    ctx.moveTo(x+r, y);
+    ctx.arcTo(x+w, y, x+w, y+h, r);
+    ctx.arcTo(x+w, y+h, x, y+h, r);
+    ctx.arcTo(x, y+h, x, y, r);
+    ctx.arcTo(x, y, x+w, y, r);
+    ctx.closePath();
+  }
+
+  function drawRocket(x,y,scale,flame,shake){
+    ctx.save();
+    ctx.translate(x + (Math.random()-0.5)*shake, y + (Math.random()-0.5)*shake);
+    ctx.scale(scale, scale);
+
+    // Local dimensions
+    const bodyH = 240;
+    const bodyW = 70;
+
+    // body gradient (Safari-safe)
+    const grad = ctx.createLinearGradient(-bodyW/2, 0, bodyW/2, 0);
+    grad.addColorStop(0, '#cfd7df');
+    grad.addColorStop(0.35, '#f2f6fa');
+    grad.addColorStop(0.70, '#c9d2db');
+    grad.addColorStop(1, '#aeb8c2');
+
+    ctx.fillStyle = grad;
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.lineWidth = 2;
+
+    // main capsule
+    rr(-bodyW/2, -bodyH, bodyW, bodyH, 18);
+    ctx.fill(); ctx.stroke();
+
+    // nose
+    ctx.fillStyle = '#f7fbff';
+    ctx.beginPath();
+    ctx.moveTo(-bodyW/2, -bodyH+10);
+    ctx.quadraticCurveTo(0, -bodyH-70, bodyW/2, -bodyH+10);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+
+    // window
+    ctx.save();
+    ctx.translate(0, -bodyH+74);
+    ctx.fillStyle = 'rgba(25,75,120,0.78)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(0,0,16,0,Math.PI*2);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.20)';
+    ctx.beginPath();
+    ctx.arc(-6,-6,7,0,Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    // stripe
+    ctx.strokeStyle = 'rgba(60,80,95,0.42)';
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(-bodyW/2+8, -bodyH+112);
+    ctx.lineTo(bodyW/2-8, -bodyH+112);
+    ctx.stroke();
+
+    // fins
+    ctx.fillStyle = '#b7c3cd';
+    ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    ctx.lineWidth = 2;
+    const finY = -30;
+    ctx.beginPath();
+    ctx.moveTo(-bodyW/2, finY);
+    ctx.lineTo(-bodyW/2-34, finY+28);
+    ctx.lineTo(-bodyW/2, finY+56);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(bodyW/2, finY);
+    ctx.lineTo(bodyW/2+34, finY+28);
+    ctx.lineTo(bodyW/2, finY+56);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+
+    // engine bell
+    const bellG = ctx.createLinearGradient(-18,0,18,0);
+    bellG.addColorStop(0,'#7e8792');
+    bellG.addColorStop(0.5,'#aeb7c1');
+    bellG.addColorStop(1,'#707984');
+    ctx.fillStyle = bellG;
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-18, 0);
+    ctx.lineTo(-24, 38);
+    ctx.quadraticCurveTo(0, 54, 24, 38);
+    ctx.lineTo(18, 0);
+    ctx.closePath();
+    ctx.fill(); ctx.stroke();
+
+    // flame (no globalCompositeOperation; use alpha + gradient)
+    if(flame > 0.02){
+      const fp = flame;
+      const len = 50 + fp*170;
+      const wid = 18 + fp*36;
+
+      // outer flame
+      ctx.save();
+      ctx.globalAlpha = 0.75;
+      const fg = ctx.createRadialGradient(0, 20, 4, 0, 20 + len*0.70, wid*2.2);
+      fg.addColorStop(0, 'rgba(255,255,255,0.95)');
+      fg.addColorStop(0.25, 'rgba(255,230,150,0.85)');
+      fg.addColorStop(0.55, 'rgba(255,140,60,0.55)');
+      fg.addColorStop(1, 'rgba(200,40,10,0)');
+      ctx.fillStyle = fg;
+      ctx.beginPath();
+      ctx.moveTo(0, 16);
+      ctx.quadraticCurveTo(-wid, 28, 0, 16 + len);
+      ctx.quadraticCurveTo(wid, 28, 0, 16);
+      ctx.closePath();
+      ctx.fill();
+
+      // inner core
+      ctx.globalAlpha = 0.85;
+      const coreLen = len*0.55;
+      const coreWid = wid*0.55;
+      const cg = ctx.createRadialGradient(0, 18, 2, 0, 18 + coreLen*0.9, coreWid*2.0);
+      cg.addColorStop(0, 'rgba(255,255,255,0.98)');
+      cg.addColorStop(0.5, 'rgba(255,245,185,0.75)');
+      cg.addColorStop(1, 'rgba(255,130,35,0)');
+      ctx.fillStyle = cg;
+      ctx.beginPath();
+      ctx.moveTo(0, 16);
+      ctx.quadraticCurveTo(-coreWid, 26, 0, 16 + coreLen);
+      ctx.quadraticCurveTo(coreWid, 26, 0, 16);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    ctx.restore();
+
+    function rr(x,y,w,h,r){
+      r = Math.max(0, Math.min(r, w/2, h/2));
+      ctx.beginPath();
+      ctx.moveTo(x + r, y);
+      ctx.arcTo(x + w, y, x + w, y + h, r);
+      ctx.arcTo(x + w, y + h, x, y + h, r);
+      ctx.arcTo(x, y + h, x, y, r);
+      ctx.arcTo(x, y, x + w, y, r);
+      ctx.closePath();
+    }
+  }
+
+  function drawParticles(){
+    // smoke (soft circles)
+    for(const p of smoke){
+      const u = p.t / p.life;
+      const r = p.rad * (1 + u*1.9);
+      const a = p.a * (1-u);
+
+      // lightweight: use a small gradient for softness (Safari OK)
+      const gx = p.x + Math.sin(p.ph + p.t*p.wob)*6;
+      const gy = p.y;
+      const g = ctx.createRadialGradient(gx, gy, r*0.2, gx, gy, r);
+      g.addColorStop(0, 'rgba(235,242,255,' + (a*0.95).toFixed(3) + ')');
+      g.addColorStop(1, 'rgba(235,242,255,0)');
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.ellipse(gx, gy, r*1.05, r*0.85, 0, 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    // sparks (tiny hot dots)
+    ctx.fillStyle = 'rgba(255,200,120,0.80)';
+    for(const s of sparks){
+      const u = s.t / s.life;
+      ctx.globalAlpha = 0.85*(1-u);
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.rad*(1-u*0.4), 0, Math.PI*2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function update(dt){
+    rocket.t += dt;
+
+    // Timeline:
+    // 0–1.6 ignition (lots smoke, shake, ramp flame)
+    // 1.6–3.0 slow liftoff (gentle up)
+    // 3.0–8.0 accelerating ascent
+    // >8 coast
+    if(rocket.state === STATE.IGNITION){
+      const u = clamp(rocket.t/1.6, 0, 1);
+      rocket.flame = 0.18 + 0.55*u;
+      rocket.shake = 2.2 * u;
+      // heavy ground smoke
+      if(Math.random() < dt*12){
+        // will also do in spawn below
+      }
+      if(rocket.t >= 1.6){
+        rocket.state = STATE.SLOW;
+        rocket.t = 0;
+        rocket.v = 0;
+      }
+    } else if(rocket.state === STATE.SLOW){
+      const u = clamp(rocket.t/1.4, 0, 1);
+      rocket.a = -55 * (0.30 + 0.25*u);
+      rocket.v += rocket.a * dt;
+      rocket.y += rocket.v * dt;
+      rocket.flame = 0.62 + 0.10*u;
+      rocket.shake = 0.9 * (1-u);
+      if(rocket.t >= 1.4){
+        rocket.state = STATE.ACCEL;
+        rocket.t = 0;
+      }
+    } else if(rocket.state === STATE.ACCEL){
+      const u = clamp(rocket.t/5.0, 0, 1);
+      const e = easeInQuad(u);
+      rocket.a = -85 - 260*e;
+      rocket.v += rocket.a * dt;
+      rocket.y += rocket.v * dt;
+      rocket.flame = 0.70 + 0.18*e;
+      rocket.shake = 0.25;
+      if(rocket.t >= 5.0){
+        rocket.state = STATE.COAST;
+        rocket.t = 0;
+      }
+    } else {
+      rocket.a = -320;
+      rocket.v += rocket.a * dt;
+      rocket.y += rocket.v * dt;
+      rocket.flame = 0.35;
+      rocket.shake = 0.0;
+      // loop when gone
+      if((innerHeight*0.78 + rocket.y) < -innerHeight*0.35){
+        rocket.state = STATE.IGNITION;
+        rocket.t = 0;
+        rocket.y = 0;
+        rocket.v = 0;
+      }
+    }
+
+    // Spawning particles around nozzle
+    const padY = innerHeight*0.78;
+    const scale = Math.min(innerWidth, innerHeight) / 900;
+    const x = innerWidth/2;
+    const baseY = padY - 12;
+    const rocketY = baseY + rocket.y;
+    const nozzleX = x;
+    const nozzleY = rocketY + 40*scale;
+
+    const nearGround = nozzleY > (padY - 90);
+    const smokeRate = nearGround ? (rocket.state===STATE.IGNITION ? 3.8 : 2.5) : 1.1;
+    const smokeCount = Math.floor(smokeRate * 55 * dt); // keep light on mobile
+
+    if(smokeCount > 0){
+      for(let i=0;i<smokeCount;i++){
+        // ground-hugging smoke in ignition
+        const heavy = (rocket.state===STATE.IGNITION && nearGround);
+        const vx = rnd(-0.8,0.8) + (heavy ? rnd(-0.6,0.6) : 0);
+        const vy = heavy ? rnd(0.1,0.9) : rnd(-0.2,0.5);
+        addSmoke(nozzleX + rnd(-10,10), nozzleY + rnd(14,32), vx, vy, heavy ? rnd(18,34) : rnd(14,26), heavy ? rnd(2.0,2.9) : rnd(1.6,2.5), heavy ? rnd(0.22,0.32) : rnd(0.14,0.22));
+      }
+      if(rocket.state===STATE.IGNITION){
+        // extra rolling smoke at pad
+        for(let i=0;i<8;i++){
+          addSmoke(nozzleX + rnd(-40,40), padY + rnd(8,22), rnd(-1.3,1.3), rnd(0.0,0.5), rnd(20,36), rnd(2.2,3.1), rnd(0.18,0.28));
+        }
+      }
+    }
+
+    // sparks
+    if(rocket.flame > 0.10){
+      const n = Math.floor((10 + rocket.flame*28) * dt);
+      for(let i=0;i<n;i++){
+        addSpark(nozzleX + rnd(-8,8), nozzleY + rnd(10,26), rnd(-20,20), rnd(30,70), rnd(1.2,2.2), rnd(0.25,0.55));
+      }
+    }
+
+    // Integrate particles
+    for(let i=smoke.length-1;i>=0;i--){
+      const p = smoke[i];
+      p.t += dt;
+      p.x += p.vx * 60 * dt;
+      p.y += p.vy * 60 * dt;
+
+      // drag + buoyancy
+      p.vx *= 0.985;
+      p.vy -= 0.012; // slowly rises
+      // turbulence
+      p.vx += rnd(-0.05,0.05);
+
+      if(p.t >= p.life) smoke.splice(i,1);
+    }
+
+    for(let i=sparks.length-1;i>=0;i--){
+      const s = sparks[i];
+      s.t += dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.vy += 220 * dt; // gravity
+      s.vx *= 0.98;
+      s.vy *= 0.98;
+      if(s.t >= s.life) sparks.splice(i,1);
+    }
+
+    return { x, y: rocketY, scale };
+  }
+
+  // --- Loop
+  let last = performance.now();
+  function frame(now){
+    const rawDt = Math.min(0.05, (now-last)/1000);
+    last = now;
+    const dt = rawDt * timeScale;
+
+    drawSky(now/1000);
+    const pose = update(dt);
+    drawGround();
+    drawParticles();
+    drawRocket(pose.x, pose.y, pose.scale, rocket.flame, rocket.shake);
+
+    requestAnimationFrame(frame);
+  }
+
+  reset();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
